@@ -1,0 +1,195 @@
+package com.freshersprep.mybank.dao;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.SQLWarning;
+import java.sql.Statement;
+import java.util.Calendar;
+import com.freshersprep.mybank.bean.Account;
+import com.freshersprep.mybank.bean.AccountHolder;
+import com.freshersprep.mybank.bean.Cheque;
+import com.freshersprep.mybank.bean.Transaction;
+import com.freshersprep.mybank.bean.TransactionType;
+import com.freshersprep.mybank.db.ConnectionFactory;
+import com.freshersprep.mybank.db.DbUtil;
+import com.freshersprep.mybank.exception.ApplicationException;
+import com.freshersprep.mybank.utils.Constants;
+
+public class AccountDAO {
+	private Connection connection;
+	private Statement statement;
+
+	// 1. Create account
+	public int createAccount(AccountHolder accountHolder) {
+		String query = "INSERT INTO account(type,balance,holder_id) " + "VALUES('"
+				+ accountHolder.getAccount().getTypeOfAccount() + "','" 
+				+ accountHolder.getAccount().getAccountBalance()
+				+ "'," + accountHolder.getId() + ")";
+		int insertedRow = 0;
+		int insertedKeyValue = 0;
+		try {
+			connection = ConnectionFactory.getConnection();
+			statement = connection.createStatement();
+			insertedRow = statement.executeUpdate(query, Statement.RETURN_GENERATED_KEYS);
+			if (insertedRow == 1) {
+				ResultSet rs = statement.getGeneratedKeys();
+				rs.next();
+				insertedKeyValue = rs.getInt(1);
+				
+				//Create a new checkbook for this account
+				ChequebookDAO chequebookDAO = new ChequebookDAO();
+				chequebookDAO.createChequebook(insertedKeyValue);
+			}
+		} catch (SQLException e) {
+			e.printStackTrace();
+		} finally {
+			DbUtil.close(statement);
+			DbUtil.close(connection);
+		}
+		return insertedKeyValue;
+	}
+
+	// 2. Check balance
+	public double getBalance(int accountNo) {
+		String query = "SELECT balance FROM account WHERE id=" + accountNo;
+		double balance = 0.0;
+		try {
+			connection = ConnectionFactory.getConnection();
+			statement = connection.createStatement();
+			ResultSet rs = statement.executeQuery(query);
+			if (rs.next()) {
+				balance = rs.getDouble("balance");
+			}
+		} catch (SQLException e) {
+			System.out.println("ERROR: Database Error has occurred");
+		} finally {
+			DbUtil.close(statement);
+			DbUtil.close(connection);
+		}
+		return balance;
+	}
+
+	// 3. Deposit amount
+	public int deposit(int accNo, double amount) throws ApplicationException {
+		Account account = getAccount(accNo);
+		int row = 0;
+		if(account != null) {
+			double balance = account.getAccountBalance();
+			balance += amount;
+			row = updateBalance(accNo, balance);
+			if(row > 0) {
+				row = addTransaction(accNo, amount, TransactionType.CREDIT, "Cash deposit");
+			}
+		}
+		return (row > 0) ? Constants.AMOUNT_DEPOSITED : Constants.INVALID_ACCOUNT_NO;
+	}
+	
+	private int addTransaction(int accNo, double amount, TransactionType type, String desc) {
+		Transaction transaction = getTransaction(accNo, amount, type, desc);
+		TransactionDAO dao = new TransactionDAO();
+		return dao.createTransaction(transaction);
+	}
+	
+	private Transaction getTransaction(int accNo, double amount, TransactionType type, String desc) {
+		Transaction transaction = new Transaction();
+		transaction.setTransactionDate(Calendar.getInstance().getTime());
+		transaction.setType(type);
+		transaction.setDescription(desc);
+		transaction.setAmount(amount);
+		transaction.setAccount(new Account(accNo));
+		return transaction;
+	}
+
+	//4. Update Balance
+	public int updateBalance(int accNo, double balance) throws ApplicationException {
+		String query = "UPDATE account SET balance=" + balance + " WHERE id=" + accNo;
+		int row = 0;
+
+		try {
+			connection = ConnectionFactory.getConnection();
+			statement = connection.createStatement();
+			row = statement.executeUpdate(query);
+			SQLWarning warning = statement.getWarnings();
+			if (warning != null)
+				throw new ApplicationException(warning.getMessage());
+		} catch (SQLException e) {
+			ApplicationException exception = new ApplicationException(e.getMessage());
+			throw exception;
+		} finally {
+			DbUtil.close(statement);
+			DbUtil.close(connection);
+		}
+		return row;
+	}
+
+	// 5. Write Cheque
+	public int writeCheque(int accNo, Cheque cheque) throws ApplicationException {
+		Account account = getAccount(accNo);
+		if (account != null) {
+			double balance = account.getAccountBalance();
+			if (cheque.getChequeAmount() <= balance) {
+				ChequebookDAO chequebookDAO = new ChequebookDAO();
+				int result = chequebookDAO.writeCheque(accNo, cheque);
+				switch (result) {
+				case Constants.CHEQUE_WRITTEN:
+					balance = balance - cheque.getChequeAmount();
+					int row = updateBalance(accNo, balance);
+					if (row > 0) {
+						addTransaction(accNo, cheque.getChequeAmount(), TransactionType.DEBIT,
+								"Cheque #" + cheque.getChequeNumber());
+					}
+					return Constants.CHEQUE_WRITTEN;
+
+				case Constants.INVALID_CHEQUE_NUMBER:
+					return Constants.INVALID_CHEQUE_NUMBER;
+
+				case Constants.INVALID_CHEQUEBOOK_NUMBER:
+					return Constants.INVALID_CHEQUEBOOK_NUMBER;
+
+				case Constants.CHEQUE_NOT_WRITTEN:
+					return Constants.CHEQUE_NOT_WRITTEN;
+				default:
+					break;
+				}
+			}
+			return Constants.NOT_ENOUGH_BALANCE;
+		}
+		return Constants.INVALID_ACCOUNT_NO;
+	}
+
+	/*public List<Transaction> getTransactions(int accountNo) {
+		TransactionDAO dao = new TransactionDAO();
+		List<Transaction> transactions = dao.getTransactions(accountNo);
+		return transactions;
+	}*/
+	
+	// 6. Get account 
+	public Account getAccount(int accountNo) {
+		String query = "SELECT * FROM account WHERE id=" + accountNo;
+		Account account = null;
+		try {
+			connection = ConnectionFactory.getConnection();
+			statement = connection.createStatement();
+			ResultSet rs = statement.executeQuery(query);
+			while (rs.next()) {
+				account = new Account();
+				/*Retrieve one account details 
+				and store it in account object*/								
+				account.setAccountNumber(rs.getInt("id"));
+				account.setTypeOfAccount(rs.getString("type"));
+				account.setAccountBalance(rs.getInt("balance"));
+				account.setAccountHolder(new AccountHolder(rs.getInt("holder_id")));
+			}
+		} catch (SQLException e) {
+			//System.out.println("ERROR: Database Error has occurred");
+		} finally {
+			DbUtil.close(statement);
+			DbUtil.close(connection);
+		}
+		return account;
+	}
+	
+	// 7. Delete account
+	// 8. Update account
+}
